@@ -1,0 +1,20 @@
+# Stage 1 - MVP зависимости
+
+# Telegram Bot
+aiogram>=3.0.0
+
+# HTTP клиент для OpenRouter API
+httpx>=0.25.0
+
+# Управление переменными окружения
+python-dotenv>=1.0.0
+
+# TTS для Windows
+pyttsx3>=2.90
+
+# STT и hotword detection
+vosk>=0.3.45
+
+# Логирование
+loguru>=0.7.0
+
