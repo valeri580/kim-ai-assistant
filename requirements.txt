@@ -15,6 +15,13 @@ pyttsx3>=2.90
 # STT и hotword detection
 vosk>=0.3.45
 
+# Работа с микрофоном
+sounddevice>=0.4.6
+numpy>=1.24.0
+
 # Логирование
 loguru>=0.7.0
+
+# Диагностика системы
+psutil>=5.9.0
 
