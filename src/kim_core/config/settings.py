@@ -26,6 +26,10 @@ class AppConfig:
     temp_warn: Optional[float] = None
     alerts_chat_id: Optional[int] = None
     diagnostics_interval_seconds: int = 60
+    # Настройки микрофона
+    mic_device_index: Optional[int] = None
+    mic_sample_rate: int = 16000
+    mic_chunk_size: int = 4000
 
     def validate(self) -> None:
         """Валидация конфигурации для режима prod."""
@@ -112,6 +116,9 @@ def load_config() -> AppConfig:
         temp_warn=get_float_or_none("TEMP_WARN"),
         alerts_chat_id=get_int_or_none("ALERTS_CHAT_ID"),
         diagnostics_interval_seconds=get_int_or_default("DIAGNOSTICS_INTERVAL_SECONDS", 60),
+        mic_device_index=get_int_or_none("MIC_DEVICE_INDEX"),
+        mic_sample_rate=get_int_or_default("MIC_SAMPLE_RATE", 16000),
+        mic_chunk_size=get_int_or_default("MIC_CHUNK_SIZE", 4000),
     )
 
     config.validate()

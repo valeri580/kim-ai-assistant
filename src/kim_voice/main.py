@@ -86,26 +86,43 @@ def main() -> None:
         logger.info("Режим LOCAL_ONLY включён — LLM не будет использоваться")
 
     try:
-        # Создание конфигурации hotword
+        # Загрузка дополнительных настроек из переменных окружения
+        load_dotenv()
+        stt_use_vad = os.getenv("STT_USE_VAD", "0").lower() in ("1", "true", "yes", "on")
+        stt_vad_aggressiveness = int(os.getenv("STT_VAD_AGGRESSIVENESS", "2"))
+        hotword_adaptive_threshold = os.getenv("HOTWORD_ADAPTIVE_THRESHOLD", "1").lower() in ("1", "true", "yes", "on")
+        
+        # Логируем используемое устройство ввода
+        if config.mic_device_index is not None:
+            logger.info(f"Используется микрофон с индексом: {config.mic_device_index}")
+        else:
+            logger.info("Используется микрофон по умолчанию")
+        
+        # Создание конфигурации hotword с настройками микрофона из config
         hotword_config = HotwordConfig(
             model_path=model_path,
-            sample_rate=16000,
-            chunk_size=4000,
+            sample_rate=config.mic_sample_rate,
+            chunk_size=config.mic_chunk_size,
             confidence_threshold=0.7,
             debounce_seconds=1.2,
+            adaptive_threshold=hotword_adaptive_threshold,
+            device_index=config.mic_device_index,
         )
 
         # Создание слушателя hotword
         logger.info("Инициализация детектора hotword...")
         listener = KimHotwordListener(hotword_config)
 
-        # Создание конфигурации STT
+        # Создание конфигурации STT с настройками микрофона из config
         stt_config = STTConfig(
             model_path=model_path,
-            sample_rate=16000,
-            chunk_size=4000,
+            sample_rate=config.mic_sample_rate,
+            chunk_size=config.mic_chunk_size,
             max_phrase_duration=10.0,
             silence_timeout=1.5,
+            use_vad=stt_use_vad,
+            vad_aggressiveness=stt_vad_aggressiveness,
+            device_index=config.mic_device_index,
         )
 
         # Создание распознавателя речи
@@ -192,6 +209,10 @@ def main() -> None:
             else:
                 return "Сейчас включён режим только локально, я не обращаюсь к ИИ-модели."
 
+        # Пороги для мягкого подтверждения
+        CONFIRMATION_CONF_THRESHOLD = 0.75  # если уверенность выше - не спрашиваем
+        CONFIRMATION_LENGTH_THRESHOLD = 25  # если фраза длиннее - спрашиваем
+
         # Определение callback при обнаружении hotword
         def on_hotword_triggered() -> None:
             """Обработчик срабатывания hotword."""
@@ -200,48 +221,81 @@ def main() -> None:
             # Озвучиваем ответ
             voice.speak("Да, слушаю.")
 
-            # Пытаемся распознать фразу с повторными попытками
-            user_text = stt.listen_with_retries(max_retries=2)
+            # Получаем фразу с уверенностью для мягкого подтверждения
+            result = stt.listen_once_with_confidence()
+            
+            if result is None:
+                # Если не удалось распознать, пробуем с обычным методом
+                user_text = stt.listen_with_retries(max_retries=2)
+                if not user_text or not user_text.strip():
+                    logger.warning("Речь не распознана после нескольких попыток")
+                    voice.speak("Не расслышала, повторите позже.")
+                    return
+                user_text_final = user_text
+                avg_conf = 1.0  # По умолчанию полная уверенность
+            else:
+                user_text_final, avg_conf = result
 
-            # Проверяем результат распознавания
-            if not user_text or not user_text.strip():
-                logger.warning("Речь не распознана после нескольких попыток")
-                voice.speak("Не расслышала, повторите позже.")
-                return
+            logger.info(f"Распознанная фраза: '{user_text_final}', уверенность: {avg_conf:.2f}")
+            print(f"\n>>> Распознано: {user_text_final}\n")
 
-            # Озвучиваем подтверждение распознанной фразы
-            logger.info(f"Распознанная фраза: '{user_text}'")
-            print(f"\n>>> Распознано: {user_text}\n")
-            voice.speak(f"Вы сказали: {user_text}. Верно?")
+            # Определяем, нужно ли подтверждение
+            needs_confirmation = (
+                avg_conf < CONFIRMATION_CONF_THRESHOLD or
+                len(user_text_final) >= CONFIRMATION_LENGTH_THRESHOLD
+            )
 
-            # Слушаем подтверждение пользователя (короткий ответ)
-            # Используем специальный метод для коротких ответов с более мягкими критериями
-            confirmation_text = stt.listen_once_for_confirmation(min_chars=2)
+            if not needs_confirmation:
+                logger.info(
+                    f"Подтверждение не требуется "
+                    f"(уверенность={avg_conf:.2f} >= {CONFIRMATION_CONF_THRESHOLD}, "
+                    f"длина={len(user_text_final)} < {CONFIRMATION_LENGTH_THRESHOLD})"
+                )
+                user_text = user_text_final
+            else:
+                # Озвучиваем подтверждение распознанной фразы
+                logger.info(
+                    f"Требуется подтверждение "
+                    f"(уверенность={avg_conf:.2f} < {CONFIRMATION_CONF_THRESHOLD} "
+                    f"или длина={len(user_text_final)} >= {CONFIRMATION_LENGTH_THRESHOLD})"
+                )
+                voice.speak(f"Кажется, вы сказали: {user_text_final}. Всё верно?")
 
-            # Обрабатываем подтверждение
-            if confirmation_text:
-                confirmation_lower = confirmation_text.lower()
-                logger.info(f"Ответ на подтверждение: '{confirmation_text}'")
+                # Слушаем подтверждение пользователя (короткий ответ)
+                confirmation_text = stt.listen_once_for_confirmation(min_chars=2)
 
-                # Если пользователь сказал "нет"
-                if any(word in confirmation_lower for word in ["нет", "неверно", "не так", "неправильно"]):
-                    logger.info("Пользователь отклонил распознанную фразу")
-                    voice.speak("Хорошо, повторите, пожалуйста.")
+                # Обрабатываем подтверждение
+                if confirmation_text:
+                    confirmation_lower = confirmation_text.lower()
+                    logger.info(f"Ответ на подтверждение: '{confirmation_text}'")
 
-                    # Повторная попытка распознавания
-                    user_text = stt.listen_with_retries(max_retries=2)
+                    # Если пользователь сказал "нет"
+                    if any(word in confirmation_lower for word in ["нет", "неверно", "не так", "неправильно"]):
+                        logger.info("Пользователь отклонил распознанную фразу, просим повторить")
+                        voice.speak("Хорошо, повторите, пожалуйста.")
 
-                    if not user_text or not user_text.strip():
-                        logger.warning("Речь не распознана после повторной попытки")
-                        voice.speak("Не расслышала, повторите позже.")
-                        return
+                        # Повторная попытка распознавания
+                        result_retry = stt.listen_once_with_confidence()
+                        if result_retry is None:
+                            user_text = stt.listen_with_retries(max_retries=2)
+                            if not user_text or not user_text.strip():
+                                logger.warning("Речь не распознана после повторной попытки")
+                                voice.speak("Не расслышала, повторите позже.")
+                                return
+                            user_text = user_text
+                        else:
+                            user_text, _ = result_retry
 
-                    logger.info(f"Повторно распознанная фраза: '{user_text}'")
-                    print(f"\n>>> Распознано: {user_text}\n")
-                    # Продолжаем с новой фразой (без повторного подтверждения)
-                # Если "да" или неясный ответ - продолжаем с текущей фразой
+                        logger.info(f"Повторно распознанная фраза: '{user_text}'")
+                        print(f"\n>>> Распознано: {user_text}\n")
+                    else:
+                        # Если "да" или неясный ответ - используем первоначальную фразу
+                        logger.info("Подтверждение получено, используем первоначальную фразу")
+                        user_text = user_text_final
                 else:
-                    logger.info("Подтверждение получено или не требуется")
+                    # Если подтверждение не распознано - используем первоначальную фразу
+                    logger.info("Подтверждение не распознано, используем первоначальную фразу")
+                    user_text = user_text_final
 
             # Ветвление по режиму local_only
             if config.local_only:
@@ -272,9 +326,32 @@ def main() -> None:
         logger.info("\nОстановка голосового ассистента по запросу пользователя...")
     except FileNotFoundError as e:
         logger.error(f"Файл не найден: {e}")
+        print(f"\n❌ ОШИБКА: Файл не найден: {e}\n")
+        sys.exit(1)
+    except RuntimeError as e:
+        error_msg = str(e)
+        if "Vosk" in error_msg or "модель" in error_msg.lower():
+            logger.exception(f"Voice assistant crashed: {e}")
+            print(
+                f"\n❌ Голосовой ассистент не смог запуститься.\n"
+                f"Проверьте модель Vosk и путь к ней в VOSK_MODEL_PATH.\n"
+                f"Детали: {error_msg}\n"
+            )
+        else:
+            logger.exception(f"Voice assistant crashed: {e}")
+            print(
+                f"\n❌ Голосовой ассистент не смог запуститься.\n"
+                f"Проверьте микрофон, модель Vosk и настройки.\n"
+                f"Детали: {error_msg}\n"
+            )
         sys.exit(1)
     except Exception as e:
-        logger.exception(f"Критическая ошибка: {e}")
+        logger.exception(f"Voice assistant crashed: {e}")
+        print(
+            f"\n❌ Голосовой ассистент не смог запуститься.\n"
+            f"Проверьте микрофон, модель Vosk и настройки.\n"
+            f"Детали: {str(e)}\n"
+        )
         sys.exit(1)
 
 

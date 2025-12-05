@@ -23,9 +23,14 @@ class HotwordConfig:
     chunk_size: int = 4000
     confidence_threshold: float = 0.7
     debounce_seconds: float = 1.2
-    min_hotword_confidence: float = 0.5  # нижний порог средней уверенности по словам (снижено для тестирования)
+    min_hotword_confidence: float = 0.5  # нижний порог средней уверенности по словам
     require_strict_word_match: bool = True  # если True — искать отдельное слово "ким"
-    min_chars_in_utterance: int = 2  # минимальная длина всей фразы (снижено для тестирования)
+    min_chars_in_utterance: int = 2  # минимальная длина всей фразы
+    adaptive_threshold: bool = True  # использовать адаптивный порог на основе шума
+    noise_floor_window: int = 100  # количество чанков для оценки шума
+    min_confidence_floor: float = 0.5  # нижняя граница порога
+    max_confidence_floor: float = 0.9  # верхняя граница порога
+    device_index: Optional[int] = None  # индекс устройства ввода (микрофон), None = по умолчанию
 
 
 class KimHotwordListener:
@@ -44,6 +49,10 @@ class KimHotwordListener:
         """
         self.config = config
         self.last_trigger_ts: float = 0.0
+        
+        # Буферы для адаптивного порога на основе шума
+        self._noise_amplitudes: list[float] = []
+        self._dynamic_conf_threshold: float = config.min_hotword_confidence
 
         # Проверка существования модели
         if not os.path.exists(config.model_path):
@@ -169,14 +178,20 @@ class KimHotwordListener:
         )
 
         try:
-            with sd.InputStream(
-                samplerate=self.config.sample_rate,
-                blocksize=self.config.chunk_size,
-                dtype="int16",
-                channels=1,
-                latency='low',  # Низкая задержка для уменьшения проблем с буферизацией
-                extra_settings=None,  # Используем настройки по умолчанию
-            ) as stream:
+            input_kwargs = {
+                "samplerate": self.config.sample_rate,
+                "blocksize": self.config.chunk_size,
+                "dtype": "int16",
+                "channels": 1,
+                "latency": "low",
+                "extra_settings": None,
+            }
+            # Добавляем device только если указан
+            if self.config.device_index is not None:
+                input_kwargs["device"] = self.config.device_index
+                logger.info(f"Hotword: использует микрофон с индексом {self.config.device_index}")
+            
+            with sd.InputStream(**input_kwargs) as stream:
                 logger.info("Микрофон открыт, ожидание ключевого слова «Ким»...")
                 logger.info("Начинаю обработку аудиопотока...")
 
@@ -223,16 +238,47 @@ class KimHotwordListener:
                             logger.debug("Hotword: получен пустой аудио-чанк, пропускаем")
                             continue
 
-                        # Диагностика уровня сигнала (приблизительная амплитуда)
+                        # Диагностика уровня сигнала и сбор данных для адаптивного порога
                         try:
                             import numpy as np
 
                             if isinstance(data, np.ndarray):
                                 amplitude = float(np.abs(data).mean())
+                                
+                                # Собираем амплитуды для оценки шума (адаптивный порог)
+                                if self.config.adaptive_threshold:
+                                    self._noise_amplitudes.append(amplitude)
+                                    # Ограничиваем размер буфера
+                                    if len(self._noise_amplitudes) > self.config.noise_floor_window:
+                                        self._noise_amplitudes.pop(0)  # Удаляем старейшее значение
+                                
                                 if chunk_count % 200 == 0:
                                     logger.debug(
                                         f"Hotword: амплитуда аудио-чунка={amplitude:.2f}"
                                     )
+                                    
+                                    # Периодически обновляем адаптивный порог
+                                    if self.config.adaptive_threshold and len(self._noise_amplitudes) >= 50:
+                                        noise_level = sum(self._noise_amplitudes) / len(self._noise_amplitudes)
+                                        # Подстраиваем порог: при низком шуме - выше порог, при высоком - ниже
+                                        # Нормализуем noise_level (примерно от 0 до 10000 для типичных значений)
+                                        # Чем выше шум, тем ниже порог (но в пределах min/max)
+                                        noise_normalized = min(noise_level / 1000.0, 1.0)  # Примерная нормализация
+                                        self._dynamic_conf_threshold = (
+                                            self.config.max_confidence_floor * (1.0 - noise_normalized * 0.4) +
+                                            self.config.min_confidence_floor * (noise_normalized * 0.4)
+                                        )
+                                        # Ограничиваем в пределах min/max
+                                        self._dynamic_conf_threshold = max(
+                                            self.config.min_confidence_floor,
+                                            min(self.config.max_confidence_floor, self._dynamic_conf_threshold)
+                                        )
+                                        logger.info(
+                                            f"Hotword: адаптивный порог обновлён, "
+                                            f"noise_level={noise_level:.2f}, "
+                                            f"dynamic_conf_threshold={self._dynamic_conf_threshold:.2f}"
+                                        )
+                                
                                 if amplitude == 0.0:
                                     logger.debug(
                                         "Hotword: аудио-чанк состоит из нулей (тишина)"
@@ -305,13 +351,28 @@ class KimHotwordListener:
                                     )
                                     continue
 
-                                # Фильтр 2: минимальная средняя уверенность
-                                if avg_conf < self.config.min_hotword_confidence:
+                                # Фильтр 2: минимальная средняя уверенность (адаптивный или статический)
+                                # Определяем порог для проверки
+                                confidence_threshold = (
+                                    self._dynamic_conf_threshold
+                                    if self.config.adaptive_threshold
+                                    else self.config.min_hotword_confidence
+                                )
+                                
+                                if avg_conf < confidence_threshold:
                                     logger.info(
                                         f"Hotword: низкая уверенность (avg_conf={avg_conf:.2f}, "
-                                        f"min={self.config.min_hotword_confidence}), игнорируем"
+                                        f"threshold={confidence_threshold:.2f}, "
+                                        f"adaptive={self.config.adaptive_threshold}), игнорируем"
                                     )
                                     continue
+                                
+                                # Логируем, какой порог использовался
+                                if self.config.adaptive_threshold:
+                                    logger.debug(
+                                        f"Hotword: проверка уверенности пройдена "
+                                        f"(avg_conf={avg_conf:.2f} >= threshold={confidence_threshold:.2f}, adaptive)"
+                                    )
 
                                 # Проверяем, является ли это hotword
                                 is_hotword = self._is_hotword(text)
