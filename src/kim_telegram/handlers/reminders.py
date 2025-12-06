@@ -55,15 +55,30 @@ async def cmd_remind(message: Message) -> None:
     )
 
     if not match:
-        await message.answer(
-            "❌ Неверный формат команды.\n\n"
-            "Используйте: `/remind YYYY-MM-DD HH:MM Текст напоминания [минут_до]`\n\n"
-            "Примеры:\n"
-            "• `/remind 2025-12-10 15:00 созвон с клиентом 30`\n"
-            "• `/remind 2025-12-10 09:00 выгулять собаку`\n\n"
-            "⚠️ Время указывается по UTC.",
-            parse_mode="Markdown",
-        )
+        # Проверяем, есть ли вообще текст после /remind
+        parts = command_text.split(maxsplit=1)
+        if len(parts) < 2:
+            # Пользователь написал только /remind без параметров
+            await message.answer(
+                "❌ Не указана дата и время.\n\n"
+                "Используйте: `/remind YYYY-MM-DD HH:MM Текст напоминания [минут_до]`\n\n"
+                "Примеры:\n"
+                "• `/remind 2025-12-10 15:00 созвон с клиентом 30`\n"
+                "• `/remind 2025-12-10 09:00 выгулять собаку`\n\n"
+                "⚠️ Время указывается по UTC.",
+                parse_mode="Markdown",
+            )
+        else:
+            # Есть текст, но формат неверный
+            await message.answer(
+                "❌ Неверный формат команды.\n\n"
+                "Используйте: `/remind YYYY-MM-DD HH:MM Текст напоминания [минут_до]`\n\n"
+                "Примеры:\n"
+                "• `/remind 2025-12-10 15:00 созвон с клиентом 30`\n"
+                "• `/remind 2025-12-10 09:00 выгулять собаку`\n\n"
+                "⚠️ Время указывается по UTC.",
+                parse_mode="Markdown",
+            )
         return
 
     date_str, hour_str, minute_str, title, minutes_before_str = match.groups()
@@ -188,7 +203,11 @@ async def cmd_remind_delete(message: Message) -> None:
     event_exists = any(e.id == event_id for e in user_events)
 
     if not event_exists:
-        await message.answer("❌ Событие с таким id не найдено.")
+        await message.answer(
+            f"❌ Напоминание с ID `{event_id}` не найдено.\n\n"
+            "Используйте `/reminders` для просмотра списка ваших напоминаний.",
+            parse_mode="Markdown",
+        )
         return
 
     # Удаляем событие

@@ -324,6 +324,42 @@ async def settings_panel() -> str:
         </div>
     </div>
 
+    <div class="section">
+        <h2>Пороги диагностики ПК</h2>
+        <p style="font-size: 14px; color: #666; margin-bottom: 15px;">
+            Настройте пороги для уведомлений о проблемах с ресурсами системы. 
+            При превышении порога будет отправлено уведомление в Telegram.
+        </p>
+        <div class="form-group">
+            <label for="cpu_warn">Порог загрузки CPU (%):</label>
+            <input type="number" id="cpu_warn" min="0" max="100" step="0.1" placeholder="например: 85.0">
+            <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                Предупреждение при загрузке CPU выше указанного значения
+            </p>
+        </div>
+        <div class="form-group">
+            <label for="ram_warn">Порог использования RAM (%):</label>
+            <input type="number" id="ram_warn" min="0" max="100" step="0.1" placeholder="например: 90.0">
+            <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                Предупреждение при использовании RAM выше указанного значения
+            </p>
+        </div>
+        <div class="form-group">
+            <label for="disk_warn">Порог использования диска (%):</label>
+            <input type="number" id="disk_warn" min="0" max="100" step="0.1" placeholder="например: 90.0">
+            <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                Предупреждение при использовании диска выше указанного значения
+            </p>
+        </div>
+        <div class="form-group">
+            <label for="temp_warn">Порог температуры (°C):</label>
+            <input type="number" id="temp_warn" min="0" step="0.1" placeholder="например: 80.0 (необязательно)">
+            <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                Предупреждение при температуре выше указанного значения. Оставьте пустым, чтобы отключить проверку температуры.
+            </p>
+        </div>
+    </div>
+
     <button onclick="saveSettings()">💾 Сохранить настройки</button>
 
     <div id="status" class="status"></div>
@@ -386,6 +422,18 @@ async def settings_panel() -> str:
                 }
                 if (settings.voice_telegram_chat_id !== undefined) {
                     document.getElementById('voice_telegram_chat_id').value = settings.voice_telegram_chat_id;
+                }
+                if (settings.cpu_warn !== undefined) {
+                    document.getElementById('cpu_warn').value = settings.cpu_warn;
+                }
+                if (settings.ram_warn !== undefined) {
+                    document.getElementById('ram_warn').value = settings.ram_warn;
+                }
+                if (settings.disk_warn !== undefined) {
+                    document.getElementById('disk_warn').value = settings.disk_warn;
+                }
+                if (settings.temp_warn !== undefined) {
+                    document.getElementById('temp_warn').value = settings.temp_warn;
                 }
             } catch (error) {
                 showStatus('Ошибка загрузки настроек: ' + error.message, 'error');
@@ -473,6 +521,26 @@ async def settings_panel() -> str:
                 patch.voice_telegram_chat_id = parseInt(chatId);
             }
 
+            const cpuWarn = document.getElementById('cpu_warn').value;
+            if (cpuWarn) {
+                patch.cpu_warn = parseFloat(cpuWarn);
+            }
+
+            const ramWarn = document.getElementById('ram_warn').value;
+            if (ramWarn) {
+                patch.ram_warn = parseFloat(ramWarn);
+            }
+
+            const diskWarn = document.getElementById('disk_warn').value;
+            if (diskWarn) {
+                patch.disk_warn = parseFloat(diskWarn);
+            }
+
+            const tempWarn = document.getElementById('temp_warn').value;
+            if (tempWarn) {
+                patch.temp_warn = parseFloat(tempWarn);
+            }
+
             const profile = document.getElementById('profile').value;
             if (profile) {
                 patch.profile = profile;
@@ -542,49 +610,71 @@ async def settings_panel() -> str:
 
                 const updated = await response.json();
                 
-                // Обновляем все поля формы
-                if (updated.mode) {
-                    // Если есть поле mode в форме, обновляем его
-                    const modeSelect = document.getElementById('mode');
-                    if (modeSelect) {
-                        modeSelect.value = updated.mode;
-                    }
+                // Обновляем все поля формы моментально
+                // Режим и профиль
+                const modeSelect = document.getElementById('mode');
+                if (modeSelect && updated.mode) {
+                    modeSelect.value = updated.mode;
                 }
                 if (updated.profile) {
                     document.getElementById('profile').value = updated.profile;
                 }
-                document.getElementById('local_only').checked = updated.local_only === true;
                 
-                if (updated.enable_voice_assistant !== undefined) {
-                    const voiceCheckbox = document.getElementById('enable_voice_assistant');
-                    if (voiceCheckbox) {
-                        voiceCheckbox.checked = updated.enable_voice_assistant === true;
-                    }
-                }
-                if (updated.enable_web_search !== undefined) {
-                    const webSearchCheckbox = document.getElementById('enable_web_search');
-                    if (webSearchCheckbox) {
-                        webSearchCheckbox.checked = updated.enable_web_search === true;
-                    }
+                // Основные настройки режима
+                const localOnlyCheckbox = document.getElementById('local_only');
+                if (localOnlyCheckbox && updated.local_only !== undefined) {
+                    localOnlyCheckbox.checked = updated.local_only === true;
                 }
                 
+                const voiceCheckbox = document.getElementById('enable_voice_assistant');
+                if (voiceCheckbox && updated.enable_voice_assistant !== undefined) {
+                    voiceCheckbox.checked = updated.enable_voice_assistant === true;
+                }
+                
+                const webSearchCheckbox = document.getElementById('enable_web_search');
+                if (webSearchCheckbox && updated.enable_web_search !== undefined) {
+                    webSearchCheckbox.checked = updated.enable_web_search === true;
+                }
+                
+                // Настройки TTS
                 if (updated.tts_rate !== undefined) {
                     document.getElementById('tts_rate').value = updated.tts_rate;
                 }
                 if (updated.tts_volume !== undefined) {
                     document.getElementById('tts_volume').value = updated.tts_volume;
                 }
-                if (updated.model_fast) {
-                    document.getElementById('model_fast').value = updated.model_fast;
+                
+                // Модели LLM (могут быть очищены для offline режима)
+                const modelFastInput = document.getElementById('model_fast');
+                if (modelFastInput) {
+                    modelFastInput.value = updated.model_fast || '';
                 }
-                if (updated.model_smart) {
-                    document.getElementById('model_smart').value = updated.model_smart;
+                const modelSmartInput = document.getElementById('model_smart');
+                if (modelSmartInput) {
+                    modelSmartInput.value = updated.model_smart || '';
                 }
-                if (updated.token_budget_daily !== undefined) {
-                    document.getElementById('token_budget_daily').value = updated.token_budget_daily;
+                
+                // Лимит токенов (может быть очищен для offline режима)
+                const tokenBudgetInput = document.getElementById('token_budget_daily');
+                if (tokenBudgetInput) {
+                    tokenBudgetInput.value = updated.token_budget_daily !== undefined ? updated.token_budget_daily : '';
                 }
+                
+                // Остальные поля
                 if (updated.voice_telegram_chat_id !== undefined) {
-                    document.getElementById('voice_telegram_chat_id').value = updated.voice_telegram_chat_id;
+                    document.getElementById('voice_telegram_chat_id').value = updated.voice_telegram_chat_id || '';
+                }
+                if (updated.cpu_warn !== undefined) {
+                    document.getElementById('cpu_warn').value = updated.cpu_warn;
+                }
+                if (updated.ram_warn !== undefined) {
+                    document.getElementById('ram_warn').value = updated.ram_warn;
+                }
+                if (updated.disk_warn !== undefined) {
+                    document.getElementById('disk_warn').value = updated.disk_warn;
+                }
+                if (updated.temp_warn !== undefined) {
+                    document.getElementById('temp_warn').value = updated.temp_warn || '';
                 }
                 
                 showStatus(`Сценарий '${scenarioLabel}' применён`, 'success');

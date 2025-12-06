@@ -18,9 +18,20 @@ from kim_core.config.settings import AppConfig
 from kim_core.llm import BudgetExceededError, LLMError, LLMRouter, OpenRouterClient
 from kim_core.logging import init_logger, logger
 from kim_core.prompts import get_system_prompt
+from kim_desktop.files.file_manager import (
+    AliasNotFoundError,
+    FileManagerError,
+    PathTraversalError,
+    find_latest_file,
+    move_file,
+    put_file,
+    resolve_alias,
+)
+from datetime import datetime, timedelta
+from kim_scheduler.calendar.service import CalendarService
 from kim_telegram.notify import TelegramNotifier
 from kim_tools.web_search.client import WebSearchClient
-from kim_tools.web_search.parser import normalize_results, summarize_results
+from kim_tools.web_search.parser import create_voice_summary, normalize_results, summarize_results
 from kim_voice.hotword.kim_hotword import HotwordConfig, KimHotwordListener
 from kim_voice.stt.speech_to_text import KimSTT, STTConfig
 from kim_voice.tts.voice import KimVoice
@@ -51,6 +62,218 @@ def get_vosk_model_path() -> str:
         )
 
     return default_path
+
+
+def extract_file_command(user_text: str) -> Optional[tuple[str, str, str]]:
+    """
+    Пытается распознать из user_text команду работы с файлами.
+
+    Варианты команд:
+    - "положи файл в документы" -> ("put", None, "documents")
+    - "перемести то что я скачал на рабочий стол" -> ("move", "downloads", "desktop")
+    - "перемести файл в загрузки" -> ("move", None, "downloads")
+
+    Args:
+        user_text: Текст пользователя
+
+    Returns:
+        Кортеж (action, source_alias, dest_alias) или None, если это не команда
+        action: "put" или "move"
+        source_alias: alias исходной директории (для move) или None
+        dest_alias: alias директории назначения
+    """
+    user_text_lower = user_text.lower().strip()
+
+    # Триггеры для "положить файл"
+    put_triggers = [
+        "положи файл",
+        "скопируй файл",
+        "положи в",
+        "скопируй в",
+    ]
+
+    # Триггеры для "переместить файл"
+    move_triggers = [
+        "перемести",
+        "перенеси",
+        "перемести файл",
+        "перенеси файл",
+    ]
+
+    # Определяем действие
+    action = None
+    trigger_pos = -1
+    trigger_text = ""
+
+    for trigger in put_triggers:
+        if trigger in user_text_lower:
+            action = "put"
+            trigger_pos = user_text_lower.find(trigger)
+            trigger_text = trigger
+            break
+
+    if action is None:
+        for trigger in move_triggers:
+            if trigger in user_text_lower:
+                action = "move"
+                trigger_pos = user_text_lower.find(trigger)
+                trigger_text = trigger
+                break
+
+    if action is None:
+        return None
+
+    # Извлекаем текст после триггера
+    after_trigger = user_text_lower[trigger_pos + len(trigger_text):].strip()
+
+    # Пытаемся найти alias назначения
+    dest_alias = None
+    source_alias = None
+
+    # Список возможных упоминаний директорий
+    alias_keywords = {
+        "documents": ["документы", "документ", "documents"],
+        "desktop": ["рабочий стол", "desktop"],
+        "downloads": ["загрузки", "загрузка", "скачал", "скачано", "downloads"],
+    }
+
+    # Ищем упоминания директорий в тексте
+    found_aliases = []
+    for alias, keywords in alias_keywords.items():
+        for keyword in keywords:
+            if keyword in after_trigger:
+                found_aliases.append((alias, keyword))
+
+    # Если найдено несколько упоминаний, первое - источник, второе - назначение
+    if len(found_aliases) >= 2:
+        source_alias = found_aliases[0][0]
+        dest_alias = found_aliases[1][0]
+    elif len(found_aliases) == 1:
+        dest_alias = found_aliases[0][0]
+        # Для move пытаемся определить источник из контекста
+        if action == "move":
+            # Если упоминается "скачал" или "загрузки" - это источник
+            if any(word in after_trigger for word in ["скачал", "скачано", "загрузки", "загрузка"]):
+                source_alias = "downloads"
+            # Если упоминается "документы" - это может быть источник
+            elif "документы" in after_trigger or "документ" in after_trigger:
+                # Проверяем, не является ли это назначением
+                if found_aliases[0][0] != "documents":
+                    source_alias = "documents"
+
+    # Если не нашли alias, пытаемся разрешить через resolve_alias
+    if dest_alias is None:
+        # Пытаемся найти последнее упоминание директории
+        for alias, keywords in alias_keywords.items():
+            for keyword in keywords:
+                if keyword in after_trigger:
+                    try:
+                        resolved = resolve_alias(keyword)
+                        dest_alias = resolved
+                        break
+                    except AliasNotFoundError:
+                        continue
+            if dest_alias:
+                break
+
+    if dest_alias is None:
+        logger.debug(f"Не удалось определить alias назначения из текста: {user_text}")
+        return None
+
+    logger.debug(
+        f"Распознана команда работы с файлами: action='{action}', "
+        f"source_alias='{source_alias}', dest_alias='{dest_alias}'"
+    )
+
+    return (action, source_alias, dest_alias)
+
+
+def extract_remind_command(user_text: str) -> Optional[tuple[str, int]]:
+    """
+    Пытается распознать из user_text команду создания напоминания с относительной датой.
+
+    Варианты команд:
+    - "напомни через 10 минут" -> ("текст напоминания", 10)
+    - "напомни через час" -> ("текст напоминания", 60)
+    - "напомни через 30 минут выпить воды" -> ("выпить воды", 30)
+
+    Args:
+        user_text: Текст пользователя
+
+    Returns:
+        Кортеж (title, minutes) или None, если это не команда
+        title: Текст напоминания
+        minutes: Количество минут до напоминания
+    """
+    import re
+    user_text_lower = user_text.lower().strip()
+
+    # Триггеры для напоминания
+    remind_triggers = [
+        "напомни через",
+        "напомни мне через",
+        "создай напоминание через",
+        "поставь напоминание через",
+    ]
+
+    # Ищем триггер
+    trigger_pos = -1
+    trigger_text = ""
+
+    for trigger in remind_triggers:
+        if trigger in user_text_lower:
+            trigger_pos = user_text_lower.find(trigger)
+            trigger_text = trigger
+            break
+
+    if trigger_pos == -1:
+        return None
+
+    # Извлекаем текст после триггера
+    after_trigger = user_text[trigger_pos + len(trigger_text):].strip()
+
+    # Парсим относительное время
+    # Паттерны: "10 минут", "30 минут", "1 час", "2 часа", "5 минут", "полчаса"
+    time_patterns = [
+        (r"(\d+)\s*минут", lambda m: int(m.group(1))),
+        (r"(\d+)\s*минуты", lambda m: int(m.group(1))),
+        (r"(\d+)\s*минуту", lambda m: int(m.group(1))),
+        (r"(\d+)\s*час", lambda m: int(m.group(1)) * 60),
+        (r"(\d+)\s*часа", lambda m: int(m.group(1)) * 60),
+        (r"(\d+)\s*часов", lambda m: int(m.group(1)) * 60),
+        (r"полчаса", lambda m: 30),
+        (r"пол часа", lambda m: 30),
+    ]
+
+    minutes = None
+    time_match_end = 0
+
+    for pattern, converter in time_patterns:
+        match = re.search(pattern, after_trigger.lower())
+        if match:
+            minutes = converter(match)
+            time_match_end = match.end()
+            break
+
+    if minutes is None:
+        logger.debug(f"Не удалось распознать время в команде напоминания: {after_trigger}")
+        return None
+
+    # Извлекаем текст напоминания (после времени)
+    title = after_trigger[time_match_end:].strip()
+
+    # Если текста нет, используем дефолтный
+    if not title:
+        title = "Напоминание"
+
+    # Убираем лишние слова в начале
+    title = re.sub(r"^(чтобы|что|о том|про то|что)\s+", "", title, flags=re.IGNORECASE).strip()
+
+    logger.debug(
+        f"Распознана команда напоминания: minutes={minutes}, title='{title}'"
+    )
+
+    return (title, minutes)
 
 
 def extract_telegram_message_command(user_text: str) -> Optional[str]:
@@ -344,6 +567,12 @@ def main() -> None:
         )
         logger.info("WebSearchClient инициализирован")
 
+        # Создание сервиса календаря для напоминаний
+        from kim_scheduler.calendar.storage import CalendarStorage
+        calendar_storage = CalendarStorage(config.reminders_db_path)
+        calendar_service = CalendarService(calendar_storage)
+        logger.info("CalendarService инициализирован")
+
         # Создание TelegramNotifier для голосовых отправок
         telegram_notifier = None
         if config.voice_telegram_chat_id is not None and config.telegram_bot_token:
@@ -609,13 +838,9 @@ def main() -> None:
                     
                     if results:
                         normalized = normalize_results(results, limit=5)
-                        summary = summarize_results(normalized)
-                        
-                        # Ограничиваем длину для голосового вывода
-                        if len(summary) > 500:
-                            summary = summary[:500] + "..."
-                        
-                        answer = f"Вот что нашёл: {summary}"
+                        # Используем короткую выжимку для голосового вывода
+                        voice_summary = create_voice_summary(normalized)
+                        answer = voice_summary
                     else:
                         answer = "К сожалению, по вашему запросу ничего не найдено."
                     
@@ -629,6 +854,98 @@ def main() -> None:
                 logger.info("Озвучивание результата поиска...")
                 context.voice.speak(answer)
                 return
+
+            # Проверяем, является ли это командой работы с файлами
+            file_command = extract_file_command(user_text)
+
+            if file_command is not None:
+                action, source_alias, dest_alias = file_command
+                logger.info(f"Обнаружена команда работы с файлами: action='{action}', source_alias='{source_alias}', dest_alias='{dest_alias}'")
+
+                try:
+                    if action == "put":
+                        # Для put нужно найти файл (последний скачанный или спросить у пользователя)
+                        context.voice.speak("Какой файл нужно скопировать? Укажите путь к файлу.")
+                        file_path_text = stt.listen_with_retries(max_retries=2)
+                        
+                        if not file_path_text or not file_path_text.strip():
+                            context.voice.speak("Не расслышала путь к файлу. Попробуйте позже.")
+                            return
+
+                        from pathlib import Path
+                        source_path = Path(file_path_text.strip())
+                        result_path = put_file(source_path, dest_alias)
+                        context.voice.speak(f"Файл успешно скопирован в {dest_alias}.")
+                        logger.info(f"Файл скопирован: {source_path} -> {result_path}")
+
+                    elif action == "move":
+                        # Для move определяем исходный файл
+                        source_path = None
+
+                        if source_alias:
+                            # Если указан источник (например, "то что я скачал"), ищем последний файл
+                            from kim_desktop.files.file_manager import find_latest_file
+                            source_path = find_latest_file(source_alias)
+                            
+                            if source_path is None:
+                                context.voice.speak(f"В {source_alias} не найдено файлов для перемещения.")
+                                return
+                        else:
+                            # Если источник не указан, спрашиваем у пользователя
+                            context.voice.speak("Какой файл нужно переместить? Укажите путь к файлу.")
+                            file_path_text = stt.listen_with_retries(max_retries=2)
+                            
+                            if not file_path_text or not file_path_text.strip():
+                                context.voice.speak("Не расслышала путь к файлу. Попробуйте позже.")
+                                return
+
+                            from pathlib import Path
+                            source_path = Path(file_path_text.strip())
+
+                        result_path = move_file(source_path, dest_alias)
+                        context.voice.speak(f"Файл успешно перемещён в {dest_alias}.")
+                        logger.info(f"Файл перемещён: {source_path} -> {result_path}")
+
+                except AliasNotFoundError as e:
+                    context.voice.speak(f"Директория не найдена: {str(e)}")
+                except (FileManagerError, PathTraversalError) as e:
+                    context.voice.speak(f"Ошибка при работе с файлом: {str(e)}")
+                except Exception as e:
+                    logger.exception(f"Ошибка при обработке файловой команды: {e}")
+                    context.voice.speak("Произошла ошибка при работе с файлом. Попробуйте позже.")
+
+                return  # Выходим, не продолжаем обычную логику
+
+            # Проверяем, является ли это командой создания напоминания
+            remind_command = extract_remind_command(user_text)
+
+            if remind_command is not None:
+                title, minutes = remind_command
+                logger.info(f"Обнаружена команда напоминания: minutes={minutes}, title='{title}'")
+
+                try:
+                    # Вычисляем время события (текущее время + minutes минут)
+                    dt_utc = datetime.utcnow() + timedelta(minutes=minutes)
+
+                    # Создаём событие
+                    event = calendar_service.create_event(
+                        user_id=0,  # В голосовом режиме user_id=0 (локальный пользователь)
+                        title=title,
+                        dt_utc=dt_utc,
+                        remind_before_minutes=10,  # По умолчанию напоминать за 10 минут
+                    )
+
+                    # Форматируем время для голосового вывода
+                    time_str = dt_utc.strftime("%H:%M")
+                    response = f"Напоминание создано на {time_str}. {title}."
+                    context.voice.speak(response)
+                    logger.info(f"Напоминание создано через голос: id={event.id}, title='{title}', minutes={minutes}")
+
+                except Exception as e:
+                    logger.exception(f"Ошибка при создании напоминания: {e}")
+                    context.voice.speak("Произошла ошибка при создании напоминания. Попробуйте позже.")
+
+                return  # Выходим, не продолжаем обычную логику
 
             # Проверяем, является ли это командой отправки в Telegram
             telegram_message = extract_telegram_message_command(user_text)

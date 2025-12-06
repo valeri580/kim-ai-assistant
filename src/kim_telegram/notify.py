@@ -23,19 +23,23 @@ class TelegramNotifier:
         self.bot: Optional[Bot] = Bot(token=bot_token)
         logger.info(f"TelegramNotifier инициализирован для chat_id={chat_id}")
 
-    async def send_alert(self, text: str) -> None:
+    async def send_alert(self, text: str, parse_mode: Optional[str] = None) -> None:
         """
         Отправляет уведомление в Telegram.
 
         Args:
             text: Текст уведомления
+            parse_mode: Режим парсинга (например, "Markdown", "HTML")
         """
         if not self.bot:
             logger.error("Bot не инициализирован")
             return
 
         try:
-            await self.bot.send_message(chat_id=self.chat_id, text=text)
+            kwargs = {"chat_id": self.chat_id, "text": text}
+            if parse_mode:
+                kwargs["parse_mode"] = parse_mode
+            await self.bot.send_message(**kwargs)
             logger.info(f"Уведомление отправлено в Telegram (chat_id={self.chat_id})")
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления в Telegram: {e}")

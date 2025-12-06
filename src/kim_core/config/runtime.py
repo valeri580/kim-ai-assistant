@@ -41,6 +41,12 @@ class RuntimeSettings(BaseModel):
     # Настройки Telegram
     voice_telegram_chat_id: Optional[int] = Field(None, description="Chat ID для голосовых отправок")
 
+    # Пороги диагностики ПК
+    cpu_warn: Optional[float] = Field(None, description="Порог предупреждения для загрузки CPU (в процентах)")
+    ram_warn: Optional[float] = Field(None, description="Порог предупреждения для использования RAM (в процентах)")
+    disk_warn: Optional[float] = Field(None, description="Порог предупреждения для использования диска (в процентах)")
+    temp_warn: Optional[float] = Field(None, description="Порог предупреждения для температуры (в градусах Цельсия)")
+
     class Config:
         """Конфигурация Pydantic."""
 
@@ -229,6 +235,16 @@ def merge_config_with_runtime(
 
     if runtime_settings.voice_telegram_chat_id is not None:
         merged_dict["voice_telegram_chat_id"] = runtime_settings.voice_telegram_chat_id
+
+    # Пороги диагностики ПК
+    if runtime_settings.cpu_warn is not None:
+        merged_dict["cpu_warn"] = runtime_settings.cpu_warn
+    if runtime_settings.ram_warn is not None:
+        merged_dict["ram_warn"] = runtime_settings.ram_warn
+    if runtime_settings.disk_warn is not None:
+        merged_dict["disk_warn"] = runtime_settings.disk_warn
+    if runtime_settings.temp_warn is not None:
+        merged_dict["temp_warn"] = runtime_settings.temp_warn
 
     # Создаём новый AppConfig с объединёнными значениями
     return AppConfig(**merged_dict)

@@ -10,6 +10,84 @@ import psutil
 from kim_core.logging import logger
 
 
+def format_telegram_message(warnings: list[str], recommendations: list[str]) -> str:
+    """
+    Форматирует сообщение для Telegram с Markdown.
+
+    Args:
+        warnings: Список предупреждений
+        recommendations: Список рекомендаций
+
+    Returns:
+        Отформатированное сообщение в Markdown
+    """
+    if not warnings:
+        return "✅ Все метрики в норме."
+
+    message_parts = ["⚠️ *Диагностика ПК: обнаружены проблемы*\n"]
+
+    # Предупреждения
+    for warning in warnings:
+        message_parts.append(f"• {warning}")
+
+    # Рекомендации
+    if recommendations:
+        message_parts.append("\n💡 *Рекомендации:*")
+        for recommendation in recommendations:
+            message_parts.append(f"• {recommendation}")
+
+    return "\n".join(message_parts)
+
+
+def format_voice_message(warnings: list[str], recommendations: list[str]) -> str:
+    """
+    Форматирует краткое сообщение для голосового вывода.
+
+    Args:
+        warnings: Список предупреждений
+        recommendations: Список рекомендаций
+
+    Returns:
+        Краткое сообщение для голосового вывода
+    """
+    if not warnings:
+        return "Все метрики в норме."
+
+    # Формируем краткие фразы
+    voice_parts = []
+
+    # Краткие предупреждения (убираем дубликаты)
+    has_cpu = any("CPU" in w for w in warnings)
+    has_ram = any("RAM" in w or "память" in w for w in warnings)
+    has_disk = any("диск" in w.lower() for w in warnings)
+    has_temp = any("температура" in w.lower() for w in warnings)
+
+    if has_cpu:
+        voice_parts.append("высокая загрузка процессора")
+    if has_ram:
+        voice_parts.append("мало памяти")
+    if has_disk:
+        voice_parts.append("мало места на диске")
+    if has_temp:
+        voice_parts.append("высокая температура")
+
+    # Формируем сообщение
+    if voice_parts:
+        message = "Обнаружены проблемы: " + ", ".join(voice_parts) + "."
+    else:
+        message = "Обнаружены проблемы с системой."
+
+    # Добавляем рекомендации, если есть
+    if recommendations:
+        message += " " + ". ".join(recommendations) + "."
+    
+    # Ограничиваем длину для голосового вывода
+    if len(message) > 250:
+        message = message[:247] + "..."
+
+    return message
+
+
 @dataclass
 class SystemMetrics:
     """Метрики системы."""
@@ -106,16 +184,43 @@ def get_metrics(disk_path: str = "/") -> SystemMetrics:
     return metrics
 
 
-def check_thresholds(metrics: SystemMetrics, thresholds: Thresholds) -> list[str]:
+def generate_recommendations(metrics: SystemMetrics) -> list[str]:
     """
-    Проверяет метрики на превышение порогов.
+    Генерирует рекомендации на основе метрик системы.
+
+    Args:
+        metrics: Метрики системы
+
+    Returns:
+        list[str]: Список рекомендаций
+    """
+    recommendations = []
+
+    # Рекомендация для CPU > 90%
+    if metrics.cpu_percent > 90.0:
+        recommendations.append("Закройте тяжёлые приложения: Chrome, VS Code")
+
+    # Рекомендация для RAM > 90%
+    if metrics.ram_percent > 90.0:
+        recommendations.append("Перезагрузите 1-2 тяжёлые программы")
+
+    # Рекомендация для температуры > 80°C
+    if metrics.temperature is not None and metrics.temperature > 80.0:
+        recommendations.append("Нужно почистить кулер")
+
+    return recommendations
+
+
+def check_thresholds(metrics: SystemMetrics, thresholds: Thresholds) -> tuple[list[str], list[str]]:
+    """
+    Проверяет метрики на превышение порогов и генерирует рекомендации.
 
     Args:
         metrics: Метрики системы
         thresholds: Пороги для проверки
 
     Returns:
-        list[str]: Список текстовых предупреждений (пустой, если всё в норме)
+        tuple[list[str], list[str]]: (предупреждения, рекомендации)
     """
     warnings = []
 
@@ -144,5 +249,8 @@ def check_thresholds(metrics: SystemMetrics, thresholds: Thresholds) -> list[str
                 f"Высокая температура: {metrics.temperature:.1f}°C (порог: {thresholds.temp_warn}°C)"
             )
 
-    return warnings
+    # Генерируем рекомендации
+    recommendations = generate_recommendations(metrics)
+
+    return warnings, recommendations
 

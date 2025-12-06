@@ -3,7 +3,7 @@
 import re
 from html import unescape
 from typing import Optional
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
@@ -29,6 +29,28 @@ class WebSearchClient:
         else:
             logger.info("WebSearchClient: используется DuckDuckGo (fallback)")
 
+    def _extract_domain(self, url: str) -> str:
+        """
+        Извлекает домен из URL.
+
+        Args:
+            url: URL для извлечения домена
+
+        Returns:
+            Домен (например, "example.com") или пустая строка
+        """
+        if not url:
+            return ""
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc or parsed.path
+            # Убираем www. если есть
+            if domain.startswith("www."):
+                domain = domain[4:]
+            return domain
+        except Exception:
+            return ""
+
     async def search(self, query: str, num_results: int = 5) -> list[dict]:
         """
         Выполняет поиск в интернете.
@@ -38,7 +60,15 @@ class WebSearchClient:
             num_results: Количество результатов
 
         Returns:
-            Список словарей с результатами: [{"title": "...", "snippet": "...", "link": "..."}, ...]
+            Список словарей с результатами: [
+                {
+                    "title": "...",
+                    "snippet": "...",
+                    "short_snippet": "...",
+                    "url": "...",
+                    "source_name": "..."
+                }, ...
+            ]
         """
         if not query or not query.strip():
             logger.warning("Пустой поисковый запрос")
@@ -88,10 +118,22 @@ class WebSearchClient:
                 link = item.get("link", "")
 
                 if title or snippet or link:
+                    cleaned_title = self._clean_html(title)
+                    cleaned_snippet = self._clean_html(snippet)
+                    domain = self._extract_domain(link)
+                    
+                    # Создаём короткий сниппет (первые 100 символов)
+                    short_snippet = cleaned_snippet[:100].strip()
+                    if len(cleaned_snippet) > 100:
+                        short_snippet += "..."
+
                     results.append({
-                        "title": self._clean_html(title),
-                        "snippet": self._clean_html(snippet),
-                        "link": link,
+                        "title": cleaned_title,
+                        "snippet": cleaned_snippet,
+                        "short_snippet": short_snippet,
+                        "url": link,
+                        "link": link,  # Для обратной совместимости
+                        "source_name": domain,
                     })
 
             logger.info(f"SerpAPI: найдено {len(results)} результатов для '{query}'")
@@ -190,10 +232,20 @@ class WebSearchClient:
             snippet = unescape(snippet)
 
             if title or snippet or link:
+                domain = self._extract_domain(link)
+                
+                # Создаём короткий сниппет (первые 100 символов)
+                short_snippet = snippet[:100].strip() if snippet else ""
+                if snippet and len(snippet) > 100:
+                    short_snippet += "..."
+
                 results.append({
                     "title": title or "Без заголовка",
                     "snippet": snippet or "Без описания",
-                    "link": link or "",
+                    "short_snippet": short_snippet,
+                    "url": link or "",
+                    "link": link or "",  # Для обратной совместимости
+                    "source_name": domain,
                 })
 
         return results

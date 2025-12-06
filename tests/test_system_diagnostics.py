@@ -27,9 +27,10 @@ def test_check_thresholds_no_warnings():
         temp_warn=None,
     )
     
-    warnings = check_thresholds(metrics, thresholds)
+    warnings, recommendations = check_thresholds(metrics, thresholds)
     
     assert len(warnings) == 0
+    assert len(recommendations) == 0
 
 
 def test_check_thresholds_cpu_warning():
@@ -48,11 +49,14 @@ def test_check_thresholds_cpu_warning():
         temp_warn=None,
     )
     
-    warnings = check_thresholds(metrics, thresholds)
+    warnings, recommendations = check_thresholds(metrics, thresholds)
     
     assert len(warnings) == 1
     assert "CPU" in warnings[0]
     assert "90.0%" in warnings[0]
+    # CPU > 90%, должна быть рекомендация
+    assert len(recommendations) == 1
+    assert "Chrome" in recommendations[0] or "VS Code" in recommendations[0]
 
 
 def test_check_thresholds_ram_warning():
@@ -71,11 +75,14 @@ def test_check_thresholds_ram_warning():
         temp_warn=None,
     )
     
-    warnings = check_thresholds(metrics, thresholds)
+    warnings, recommendations = check_thresholds(metrics, thresholds)
     
     assert len(warnings) == 1
     assert "RAM" in warnings[0] or "память" in warnings[0]
     assert "95.0%" in warnings[0]
+    # RAM > 90%, должна быть рекомендация
+    assert len(recommendations) == 1
+    assert "перезагрузите" in recommendations[0].lower() or "программы" in recommendations[0].lower()
 
 
 def test_check_thresholds_disk_warning():
@@ -94,11 +101,13 @@ def test_check_thresholds_disk_warning():
         temp_warn=None,
     )
     
-    warnings = check_thresholds(metrics, thresholds)
+    warnings, recommendations = check_thresholds(metrics, thresholds)
     
     assert len(warnings) == 1
     assert "диск" in warnings[0].lower() or "disk" in warnings[0].lower()
     assert "95.0%" in warnings[0]
+    # Диск > 90%, но нет рекомендации (рекомендации только для CPU > 90%, RAM > 90%, temp > 80°C)
+    assert len(recommendations) == 0
 
 
 def test_check_thresholds_temperature_warning():
@@ -117,11 +126,14 @@ def test_check_thresholds_temperature_warning():
         temp_warn=80.0,
     )
     
-    warnings = check_thresholds(metrics, thresholds)
+    warnings, recommendations = check_thresholds(metrics, thresholds)
     
     assert len(warnings) == 1
     assert "температура" in warnings[0].lower() or "temperature" in warnings[0].lower()
     assert "85.0" in warnings[0]
+    # Температура > 80°C, должна быть рекомендация
+    assert len(recommendations) == 1
+    assert "кулер" in recommendations[0].lower()
 
 
 def test_check_thresholds_multiple_warnings():
@@ -140,9 +152,11 @@ def test_check_thresholds_multiple_warnings():
         temp_warn=None,
     )
     
-    warnings = check_thresholds(metrics, thresholds)
+    warnings, recommendations = check_thresholds(metrics, thresholds)
     
     assert len(warnings) == 3
+    # CPU > 90% и RAM > 90%, должны быть рекомендации
+    assert len(recommendations) >= 2
 
 
 def test_check_thresholds_temperature_ignored_when_not_set():
@@ -161,9 +175,10 @@ def test_check_thresholds_temperature_ignored_when_not_set():
         temp_warn=None,  # Порог не задан
     )
     
-    warnings = check_thresholds(metrics, thresholds)
+    warnings, recommendations = check_thresholds(metrics, thresholds)
     
     assert len(warnings) == 0
+    assert len(recommendations) == 0
 
 
 def test_check_thresholds_temperature_ignored_when_metrics_none():
@@ -182,9 +197,10 @@ def test_check_thresholds_temperature_ignored_when_metrics_none():
         temp_warn=80.0,
     )
     
-    warnings = check_thresholds(metrics, thresholds)
+    warnings, recommendations = check_thresholds(metrics, thresholds)
     
     assert len(warnings) == 0
+    assert len(recommendations) == 0
 
 
 @patch('kim_desktop.diagnostics.system_info.psutil')

@@ -11,29 +11,43 @@ if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
 from kim_core.config import load_config
+from kim_core.config.runtime import RuntimeSettingsStore, merge_config_with_runtime
 from kim_core.logging import init_logger, logger
-from kim_desktop.diagnostics.system_info import Thresholds, check_thresholds, get_metrics
+from kim_desktop.diagnostics.system_info import (
+    Thresholds,
+    check_thresholds,
+    format_telegram_message,
+    format_voice_message,
+    get_metrics,
+)
 from kim_telegram.notify import TelegramNotifier
 
 
 async def main() -> None:
     """Основная функция сервиса диагностики."""
-    # Загрузка конфигурации
-    config = load_config()
+    # Загрузка базовой конфигурации
+    base_config = load_config()
 
     # Инициализация логирования
-    init_logger(config)
+    init_logger(base_config)
+
+    # Загрузка runtime-настроек и объединение с базовой конфигурацией
+    import os
+    settings_path = os.getenv("RUNTIME_SETTINGS_PATH", "data/runtime_settings.json")
+    runtime_store = RuntimeSettingsStore(settings_path)
+    runtime_settings = runtime_store.load()
+    merged_config = merge_config_with_runtime(base_config, runtime_settings)
 
     logger.info("=" * 60)
     logger.info("Запуск сервиса диагностики системы")
     logger.info("=" * 60)
 
-    # Создание порогов из конфигурации
+    # Создание порогов из объединённой конфигурации (runtime overrides)
     thresholds = Thresholds(
-        cpu_warn=config.cpu_warn,
-        ram_warn=config.ram_warn,
-        disk_warn=config.disk_warn,
-        temp_warn=config.temp_warn,
+        cpu_warn=merged_config.cpu_warn,
+        ram_warn=merged_config.ram_warn,
+        disk_warn=merged_config.disk_warn,
+        temp_warn=merged_config.temp_warn,
     )
 
     logger.info(f"Пороги: CPU={thresholds.cpu_warn}%, RAM={thresholds.ram_warn}%, "
@@ -43,13 +57,13 @@ async def main() -> None:
     # Инициализация Telegram уведомителя
     telegram_notifier: TelegramNotifier | None = None
 
-    if config.alerts_chat_id is None:
+    if merged_config.alerts_chat_id is None:
         logger.warning(
             "ALERTS_CHAT_ID не задан в конфигурации. "
             "Уведомления в Telegram отключены. "
             "Голосовые уведомления всё ещё доступны, если голосовой ассистент запущен."
         )
-    elif not config.telegram_bot_token:
+    elif not merged_config.telegram_bot_token:
         logger.warning(
             "BOT_TOKEN не задан. Уведомления в Telegram недоступны. "
             "Голосовые уведомления всё ещё доступны, если голосовой ассистент запущен."
@@ -57,10 +71,10 @@ async def main() -> None:
     else:
         try:
             telegram_notifier = TelegramNotifier(
-                bot_token=config.telegram_bot_token,
-                chat_id=config.alerts_chat_id,
+                bot_token=merged_config.telegram_bot_token,
+                chat_id=merged_config.alerts_chat_id,
             )
-            logger.info(f"Telegram уведомления включены для chat_id={config.alerts_chat_id}")
+            logger.info(f"Telegram уведомления включены для chat_id={merged_config.alerts_chat_id}")
         except Exception as e:
             logger.error(f"Ошибка инициализации TelegramNotifier: {e}")
 
@@ -85,41 +99,49 @@ async def main() -> None:
         logger.info("Сервис завершает работу")
         return
 
-    interval = config.diagnostics_interval_seconds
+    interval = merged_config.diagnostics_interval_seconds
     logger.info(f"Интервал проверки: {interval} секунд")
     logger.info("Сервис диагностики запущен. Для остановки нажмите Ctrl+C")
     logger.info("=" * 60)
 
     try:
         while True:
+            # Проверяем, изменились ли runtime-настройки
+            new_runtime_settings = runtime_store.reload_if_changed()
+            if new_runtime_settings is not None:
+                merged_config = merge_config_with_runtime(base_config, new_runtime_settings)
+                thresholds = Thresholds(
+                    cpu_warn=merged_config.cpu_warn,
+                    ram_warn=merged_config.ram_warn,
+                    disk_warn=merged_config.disk_warn,
+                    temp_warn=merged_config.temp_warn,
+                )
+                logger.info(f"Пороги обновлены: CPU={thresholds.cpu_warn}%, RAM={thresholds.ram_warn}%, "
+                           f"Диск={thresholds.disk_warn}%, "
+                           f"Температура={'не задана' if thresholds.temp_warn is None else f'{thresholds.temp_warn}°C'}")
+
             # Сбор метрик
             metrics = get_metrics()
 
-            # Проверка порогов
-            warnings = check_thresholds(metrics, thresholds)
+            # Проверка порогов и генерация рекомендаций
+            warnings, recommendations = check_thresholds(metrics, thresholds)
 
             if warnings:
-                # Формирование текста уведомления
-                alert_text = "⚠️ Диагностика ПК: обнаружены проблемы:\n\n"
-                for warning in warnings:
-                    alert_text += f"• {warning}\n"
+                logger.warning(f"Обнаружены проблемы: {len(warnings)} предупреждений, {len(recommendations)} рекомендаций")
 
-                logger.warning(f"Обнаружены проблемы: {len(warnings)} предупреждений")
-
-                # Отправка в Telegram
+                # Отправка в Telegram с Markdown форматированием
                 if telegram_notifier:
                     try:
-                        await telegram_notifier.send_alert(alert_text)
+                        telegram_message = format_telegram_message(warnings, recommendations)
+                        await telegram_notifier.send_alert(telegram_message, parse_mode="Markdown")
                     except Exception as e:
                         logger.error(f"Ошибка отправки уведомления в Telegram: {e}")
 
-                # Голосовое уведомление
+                # Голосовое уведомление (краткие фразы)
                 if voice:
                     try:
-                        voice.speak(
-                            "Внимание, обнаружены проблемы с ресурсами компьютера. "
-                            "Я отправила подробности в Telegram."
-                        )
+                        voice_message = format_voice_message(warnings, recommendations)
+                        voice.speak(voice_message)
                     except Exception as e:
                         logger.warning(f"Ошибка голосового уведомления: {e}")
             else:

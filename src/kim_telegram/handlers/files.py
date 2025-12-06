@@ -11,6 +11,16 @@ from aiogram.types import Message
 from kim_core.config.settings import AppConfig
 from kim_core.llm import LLMRouter
 from kim_core.logging import logger
+from kim_desktop.files.file_manager import (
+    AliasNotFoundError,
+    FileManagerError,
+    PathTraversalError,
+    find_latest_file,
+    list_files,
+    move_file,
+    put_file,
+    resolve_alias,
+)
 from kim_desktop.files.reader import (
     FileAccessError,
     FileTypeNotSupportedError,
@@ -139,4 +149,201 @@ async def cmd_file_summary(message: Message) -> None:
     except Exception as e:
         # Все остальные исключения уже обработаны в wrap_llm_call или выше
         logger.exception(f"Неожиданная ошибка при обработке команды file_summary: {e}")
+
+
+@router.message(Command("file_put"))
+async def cmd_file_put(message: Message) -> None:
+    """
+    Обработчик команды /file_put.
+
+    Формат: /file_put <local-path> <alias>
+    Пример: /file_put C:\Users\User\Downloads\file.pdf documents
+    """
+    if _config is None:
+        logger.error("Зависимости не инициализированы")
+        await message.answer("Ошибка инициализации. Попробуйте позже.")
+        return
+
+    command_text = message.text or ""
+    parts = command_text.split(maxsplit=2)
+
+    if len(parts) < 3:
+        await message.answer(
+            "❌ Неверный формат команды.\n\n"
+            "Используйте: `/file_put <путь_к_файлу> <alias>`\n\n"
+            "Примеры:\n"
+            "• `/file_put C:\\Users\\User\\Downloads\\file.pdf documents`\n"
+            "• `/file_put D:\\Work\\report.docx desktop`\n\n"
+            "Доступные alias: `downloads`, `desktop`, `documents`",
+            parse_mode="Markdown",
+        )
+        return
+
+    source_path_str = parts[1].strip()
+    alias = parts[2].strip()
+
+    if not source_path_str or not alias:
+        await message.answer("❌ Путь к файлу и alias не могут быть пустыми.")
+        return
+
+    try:
+        source_path = Path(source_path_str)
+        result_path = put_file(source_path, alias)
+
+        await message.answer(
+            f"✅ Файл успешно скопирован в `{alias}`:\n"
+            f"`{result_path}`",
+            parse_mode="Markdown",
+        )
+        logger.info(f"Файл скопирован пользователем {message.from_user.id}: {source_path} -> {result_path}")
+
+    except AliasNotFoundError as e:
+        await message.answer(
+            f"❌ Alias не найден: {alias}\n\n"
+            f"Доступные alias: `downloads`, `desktop`, `documents`",
+            parse_mode="Markdown",
+        )
+    except (FileManagerError, PathTraversalError) as e:
+        await message.answer(f"❌ Ошибка при копировании файла: {str(e)}")
+    except Exception as e:
+        logger.exception(f"Неожиданная ошибка при обработке команды file_put: {e}")
+        await message.answer("❌ Произошла неожиданная ошибка. Попробуйте позже.")
+
+
+@router.message(Command("file_move"))
+async def cmd_file_move(message: Message) -> None:
+    """
+    Обработчик команды /file_move.
+
+    Формат: /file_move <src> <dest_alias>
+    Пример: /file_move C:\Users\User\Downloads\file.pdf documents
+    """
+    if _config is None:
+        logger.error("Зависимости не инициализированы")
+        await message.answer("Ошибка инициализации. Попробуйте позже.")
+        return
+
+    command_text = message.text or ""
+    parts = command_text.split(maxsplit=2)
+
+    if len(parts) < 3:
+        await message.answer(
+            "❌ Неверный формат команды.\n\n"
+            "Используйте: `/file_move <путь_к_файлу> <alias>`\n\n"
+            "Примеры:\n"
+            "• `/file_move C:\\Users\\User\\Downloads\\file.pdf documents`\n"
+            "• `/file_move D:\\Work\\report.docx desktop`\n\n"
+            "Доступные alias: `downloads`, `desktop`, `documents`",
+            parse_mode="Markdown",
+        )
+        return
+
+    source_path_str = parts[1].strip()
+    alias = parts[2].strip()
+
+    if not source_path_str or not alias:
+        await message.answer("❌ Путь к файлу и alias не могут быть пустыми.")
+        return
+
+    try:
+        source_path = Path(source_path_str)
+        result_path = move_file(source_path, alias)
+
+        await message.answer(
+            f"✅ Файл успешно перемещён в `{alias}`:\n"
+            f"`{result_path}`",
+            parse_mode="Markdown",
+        )
+        logger.info(f"Файл перемещён пользователем {message.from_user.id}: {source_path} -> {result_path}")
+
+    except AliasNotFoundError as e:
+        await message.answer(
+            f"❌ Alias не найден: {alias}\n\n"
+            f"Доступные alias: `downloads`, `desktop`, `documents`",
+            parse_mode="Markdown",
+        )
+    except (FileManagerError, PathTraversalError) as e:
+        await message.answer(f"❌ Ошибка при перемещении файла: {str(e)}")
+    except Exception as e:
+        logger.exception(f"Неожиданная ошибка при обработке команды file_move: {e}")
+        await message.answer("❌ Произошла неожиданная ошибка. Попробуйте позже.")
+
+
+@router.message(Command("file_list"))
+async def cmd_file_list(message: Message) -> None:
+    """
+    Обработчик команды /file_list.
+
+    Формат: /file_list <alias> [pattern]
+    Пример: /file_list documents
+    Пример: /file_list downloads *.pdf
+    """
+    if _config is None:
+        logger.error("Зависимости не инициализированы")
+        await message.answer("Ошибка инициализации. Попробуйте позже.")
+        return
+
+    command_text = message.text or ""
+    parts = command_text.split(maxsplit=2)
+
+    if len(parts) < 2:
+        await message.answer(
+            "❌ Неверный формат команды.\n\n"
+            "Используйте: `/file_list <alias> [pattern]`\n\n"
+            "Примеры:\n"
+            "• `/file_list documents`\n"
+            "• `/file_list downloads *.pdf`\n\n"
+            "Доступные alias: `downloads`, `desktop`, `documents`",
+            parse_mode="Markdown",
+        )
+        return
+
+    alias = parts[1].strip()
+    pattern = parts[2].strip() if len(parts) > 2 else None
+
+    if not alias:
+        await message.answer("❌ Alias не может быть пустым.")
+        return
+
+    try:
+        files = list_files(alias, pattern)
+
+        if not files:
+            pattern_text = f" (шаблон: `{pattern}`)" if pattern else ""
+            await message.answer(
+                f"📁 В директории `{alias}` файлов не найдено{pattern_text}.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Формируем список файлов
+        file_list = []
+        for i, file_path in enumerate(files[:50], 1):  # Ограничиваем 50 файлами
+            file_size = file_path.stat().st_size
+            size_mb = file_size / (1024 * 1024)
+            file_list.append(f"`{i}.` `{file_path.name}` ({size_mb:.2f} MB)")
+
+        response = f"📁 Файлы в `{alias}`:\n\n" + "\n".join(file_list)
+
+        if len(files) > 50:
+            response += f"\n\n... и ещё {len(files) - 50} файлов"
+
+        # Ограничиваем длину сообщения
+        if len(response) > 4000:
+            response = response[:3900] + "\n\n... (список обрезан)"
+
+        await message.answer(response, parse_mode="Markdown")
+        logger.info(f"Список файлов отправлен пользователю {message.from_user.id} для alias: {alias}")
+
+    except AliasNotFoundError as e:
+        await message.answer(
+            f"❌ Alias не найден: {alias}\n\n"
+            f"Доступные alias: `downloads`, `desktop`, `documents`",
+            parse_mode="Markdown",
+        )
+    except FileManagerError as e:
+        await message.answer(f"❌ Ошибка при получении списка файлов: {str(e)}")
+    except Exception as e:
+        logger.exception(f"Неожиданная ошибка при обработке команды file_list: {e}")
+        await message.answer("❌ Произошла неожиданная ошибка. Попробуйте позже.")
 

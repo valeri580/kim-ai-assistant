@@ -5,7 +5,7 @@ from typing import Optional
 
 from aiogram import Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from kim_core.config.settings import AppConfig
 from kim_core.logging import logger
@@ -84,27 +84,68 @@ async def cmd_web(message: Message) -> None:
             timeout_message="Превышено время ожидания ответа от поиска. Попробуйте ещё раз.",
         )
         
-        if not results:
+        # Нормализуем результаты
+        normalized = normalize_results(results, limit=5)
+        
+        if not normalized:
             await message.answer(
                 f"🔍 По запросу «{query}» ничего не найдено.\n\n"
                 "Попробуйте изменить формулировку запроса."
             )
             return
-
-        # Нормализуем результаты
-        normalized = normalize_results(results, limit=5)
         
-        # Создаём краткое описание
-        summary = summarize_results(normalized)
+        # Форматируем ответ: title + url для каждого результата
+        response_parts = [f"🔍 Найдено {len(normalized)} результатов по запросу «{query}»:\n"]
         
-        # Форматируем ответ
-        response = f"🔍 Вот что удалось найти по запросу «{query}»:\n\n{summary}"
+        for i, result in enumerate(normalized, 1):
+            title = result.get("title", "Без заголовка")
+            url = result.get("url", "") or result.get("link", "")
+            source_name = result.get("source_name", "")
+            
+            # Формат: 1) <title>\n   <url>
+            response_parts.append(f"\n{i}) *{title}*")
+            if url:
+                response_parts.append(f"   `{url}`")
+            if source_name:
+                response_parts.append(f"   _{source_name}_")
+        
+        response = "\n".join(response_parts)
         
         # Ограничиваем длину сообщения (Telegram имеет лимит ~4096 символов)
         if len(response) > 4000:
             response = response[:3900] + "\n\n... (сообщение обрезано)"
         
-        await message.answer(response)
+        # Создаём кнопки для результатов
+        keyboard_buttons = []
+        
+        # Добавляем кнопку "Открыть в браузере" для первого результата
+        if normalized and (normalized[0].get("url") or normalized[0].get("link")):
+            first_url = normalized[0].get("url") or normalized[0].get("link")
+            keyboard_buttons.append([InlineKeyboardButton(
+                text="🌐 Открыть в браузере",
+                url=first_url
+            )])
+        
+        # Добавляем кнопки для остальных результатов (максимум 3 дополнительных)
+        for result in normalized[1:4]:  # Пропускаем первый, берём до 3 дополнительных
+            url = result.get("url", "") or result.get("link", "")
+            if url:
+                title = result.get("title", "Открыть")
+                # Сокращаем длину заголовка для кнопки
+                if len(title) > 40:
+                    title = title[:37] + "..."
+                keyboard_buttons.append([InlineKeyboardButton(
+                    text=f"🔗 {title}",
+                    url=url
+                )])
+        
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons) if keyboard_buttons else None
+        
+        await message.answer(
+            response,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
         logger.info(f"Веб-поиск выполнен: найдено {len(normalized)} результатов")
 
     except (TimeoutError, asyncio.TimeoutError):

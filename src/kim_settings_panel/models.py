@@ -54,6 +54,10 @@ class RuntimeSettingsUpdate(BaseModel):
     mic_sample_rate: Optional[int] = Field(None, description="Частота дискретизации микрофона")
     mic_chunk_size: Optional[int] = Field(None, description="Размер чанка микрофона")
     voice_telegram_chat_id: Optional[int] = Field(None, description="Chat ID для голосовых отправок")
+    cpu_warn: Optional[float] = Field(None, description="Порог предупреждения для загрузки CPU (в процентах)")
+    ram_warn: Optional[float] = Field(None, description="Порог предупреждения для использования RAM (в процентах)")
+    disk_warn: Optional[float] = Field(None, description="Порог предупреждения для использования диска (в процентах)")
+    temp_warn: Optional[float] = Field(None, description="Порог предупреждения для температуры (в градусах Цельсия)")
 
     class Config:
         """Конфигурация Pydantic."""
