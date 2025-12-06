@@ -55,6 +55,7 @@ class OpenRouterClient:
         max_tokens: Optional[int] = None,
         temperature: float = 0.7,
         timeout: float = 60.0,
+        tools: Optional[list[dict]] = None,
     ) -> tuple[str, LLMUsage]:
         """
         Выполняет запрос к OpenRouter API.
@@ -65,6 +66,7 @@ class OpenRouterClient:
             max_tokens: Максимальное количество токенов в ответе
             temperature: Температура генерации (0.0-2.0)
             timeout: Таймаут запроса в секундах
+            tools: Список инструментов для LLM (опционально)
 
         Returns:
             tuple[str, LLMUsage]: Ответ LLM и информация об использовании токенов
@@ -95,6 +97,9 @@ class OpenRouterClient:
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
 
+        if tools:
+            body["tools"] = tools
+
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 logger.debug(
@@ -115,9 +120,17 @@ class OpenRouterClient:
                 if "choices" not in data or not data["choices"]:
                     raise LLMError("Ответ не содержит choices")
 
-                content = data["choices"][0].get("message", {}).get("content", "")
+                message = data["choices"][0].get("message", {})
+                content = message.get("content", "")
+                
+                # Проверяем наличие tool_calls
+                tool_calls = message.get("tool_calls")
+                if tool_calls:
+                    # Если есть tool_calls, возвращаем их вместо content
+                    return {"tool_calls": tool_calls}, usage
+                
                 if not content:
-                    raise LLMError("Ответ не содержит content")
+                    raise LLMError("Ответ не содержит content или tool_calls")
 
                 # Извлекаем информацию об использовании токенов
                 usage_data = data.get("usage", {})
@@ -133,6 +146,9 @@ class OpenRouterClient:
                     f"стоимость={usage.cost}"
                 )
 
+                # Возвращаем строку или dict с tool_calls
+                if isinstance(content, dict):
+                    return content, usage
                 return content, usage
 
         except httpx.RequestError as e:

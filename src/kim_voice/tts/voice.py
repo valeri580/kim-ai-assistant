@@ -224,6 +224,40 @@ class KimVoice:
         except Exception as e:
             logger.debug(f"Ошибка настройки голоса: {e}")
 
+    def set_rate(self, rate: int) -> None:
+        """
+        Обновляет скорость речи.
+
+        Args:
+            rate: Скорость речи (-10 до 10 для COM) или слов/минуту (для pyttsx3)
+        """
+        with self._lock:
+            if self.use_com and self.speaker:
+                com_rate = self._convert_rate_to_com(rate)
+                self.speaker.Rate = com_rate
+                logger.debug(f"TTS скорость обновлена (COM): {self.speaker.Rate}")
+            elif self.engine:
+                pyttsx3_rate = rate if isinstance(rate, int) and rate > 50 else 170
+                self.engine.setProperty("rate", pyttsx3_rate)
+                logger.debug(f"TTS скорость обновлена (pyttsx3): {pyttsx3_rate}")
+
+    def set_volume(self, volume: int) -> None:
+        """
+        Обновляет громкость.
+
+        Args:
+            volume: Громкость (0-100 для COM) или (0.0-1.0 для pyttsx3)
+        """
+        with self._lock:
+            if self.use_com and self.speaker:
+                com_volume = self._convert_volume_to_com(volume)
+                self.speaker.Volume = com_volume
+                logger.debug(f"TTS громкость обновлена (COM): {self.speaker.Volume}%")
+            elif self.engine:
+                pyttsx3_volume = volume if isinstance(volume, float) and volume <= 1.0 else (volume / 100.0 if volume > 1 else 1.0)
+                self.engine.setProperty("volume", pyttsx3_volume)
+                logger.debug(f"TTS громкость обновлена (pyttsx3): {pyttsx3_volume}")
+
     def speak(self, text: str) -> None:
         """
         Озвучивает текст.

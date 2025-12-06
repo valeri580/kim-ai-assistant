@@ -1,8 +1,9 @@
 """Маршрутизатор моделей LLM с учётом лимитов токенов."""
 
+import json
 import re
 from datetime import date
-from typing import Optional
+from typing import Any, Optional
 
 from kim_core.config.settings import AppConfig
 from kim_core.llm.openrouter_client import LLMError, OpenRouterClient, LLMUsage
@@ -39,6 +40,7 @@ class LLMRouter:
         self.client = client or OpenRouterClient(config)
         self._current_date = date.today()
         self._tokens_used_today = 0
+        self._tools: list[Any] = []  # Список зарегистрированных инструментов
 
     def _reset_if_new_day(self) -> None:
         """Сбрасывает счётчик токенов, если дата сменилась."""
@@ -96,6 +98,79 @@ class LLMRouter:
 
         return model, cleaned_messages
 
+    def register_tool(self, tool: Any) -> None:
+        """
+        Регистрирует инструмент для использования LLM.
+
+        Args:
+            tool: Инструмент с методами name, description, request_model, run
+        """
+        self._tools.append(tool)
+        logger.info(f"Зарегистрирован инструмент: {tool.name}")
+
+    def _get_tools_schema(self) -> list[dict]:
+        """
+        Формирует схему инструментов для OpenAI API.
+
+        Returns:
+            Список схем инструментов
+        """
+        tools_schema = []
+        for tool in self._tools:
+            # Получаем схему модели запроса из Pydantic
+            request_schema = tool.request_model.model_json_schema()
+            
+            tools_schema.append({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": request_schema,
+                },
+            })
+        return tools_schema
+
+    async def _execute_tool_call(self, tool_call: dict) -> dict:
+        """
+        Выполняет вызов инструмента.
+
+        Args:
+            tool_call: Словарь с информацией о вызове инструмента
+
+        Returns:
+            Результат выполнения инструмента
+        """
+        function_name = tool_call.get("function", {}).get("name")
+        function_args = tool_call.get("function", {}).get("arguments", "{}")
+        
+        # Ищем инструмент по имени
+        tool = None
+        for t in self._tools:
+            if t.name == function_name:
+                tool = t
+                break
+        
+        if not tool:
+            logger.warning(f"Инструмент '{function_name}' не найден")
+            return {"error": f"Инструмент '{function_name}' не найден"}
+
+        try:
+            # Парсим аргументы (JSON-строка)
+            args = json.loads(function_args)
+            
+            # Создаём запрос через Pydantic модель
+            request = tool.request_model(**args)
+            
+            # Выполняем инструмент
+            result = await tool.run(request)
+            
+            logger.info(f"Инструмент '{function_name}' выполнен успешно")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Ошибка выполнения инструмента '{function_name}': {e}")
+            return {"error": str(e)}
+
     async def run(
         self,
         messages: list[dict],
@@ -131,13 +206,54 @@ class LLMRouter:
             logger.warning(error_msg)
             raise BudgetExceededError(error_msg)
 
-        # Выполняем запрос
+        # Формируем схему инструментов, если они есть
+        tools_schema = self._get_tools_schema() if self._tools else None
+
+        # Выполняем запрос (может вернуть tool_calls)
         response, usage = await self.client.complete(
-            cleaned_messages, model, max_tokens, temperature
+            cleaned_messages, model, max_tokens, temperature, tools=tools_schema
         )
 
         # Обновляем счётчик токенов
         self._tokens_used_today += usage.total_tokens
+
+        # Если ответ содержит tool_calls, выполняем их
+        if isinstance(response, dict) and "tool_calls" in response:
+            tool_calls = response["tool_calls"]
+            logger.info(f"Обнаружены вызовы инструментов: {len(tool_calls)}")
+            
+            # Выполняем все вызовы инструментов
+            tool_results = []
+            for tool_call in tool_calls:
+                result = await self._execute_tool_call(tool_call)
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id"),
+                    "content": str(result),
+                })
+            
+            # Добавляем результаты инструментов в сообщения
+            cleaned_messages.extend(tool_results)
+            
+            # Выполняем повторный запрос с результатами инструментов
+            final_response, final_usage = await self.client.complete(
+                cleaned_messages, model, max_tokens, temperature, tools=tools_schema
+            )
+            
+            # Обновляем счётчик токенов с учётом второго запроса
+            self._tokens_used_today += final_usage.total_tokens
+            
+            logger.info(
+                f"Модель: {model}, "
+                f"токены: {usage.total_tokens + final_usage.total_tokens} "
+                f"(сегодня: {self._tokens_used_today}/{self.config.token_budget_daily})"
+            )
+            
+            # Возвращаем финальный ответ (не tool_calls)
+            if isinstance(final_response, dict) and "tool_calls" in final_response:
+                # Если снова tool_calls, возвращаем ошибку (ограничиваем рекурсию)
+                return "Произошла ошибка: модель запросила слишком много инструментов."
+            return final_response
 
         logger.info(
             f"Модель: {model}, "

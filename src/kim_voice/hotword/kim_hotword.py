@@ -36,7 +36,7 @@ class HotwordConfig:
 class KimHotwordListener:
     """Слушатель ключевого слова «Ким» через Vosk."""
 
-    def __init__(self, config: HotwordConfig) -> None:
+    def __init__(self, config: HotwordConfig, error_tts_callback: Optional[Callable[[str], None]] = None) -> None:
         """
         Инициализирует слушатель hotword.
 
@@ -49,6 +49,11 @@ class KimHotwordListener:
         """
         self.config = config
         self.last_trigger_ts: float = 0.0
+        self.error_tts_callback = error_tts_callback
+        
+        # Счётчики ошибок для предотвращения спама советов
+        self._error_247_count = 0
+        self._overflow_count = 0
         
         # Буферы для адаптивного порога на основе шума
         self._noise_amplitudes: list[float] = []
@@ -186,13 +191,30 @@ class KimHotwordListener:
                 "latency": "low",
                 "extra_settings": None,
             }
-            # Добавляем device только если указан
+            # Определяем имя устройства для логирования
+            device_name = "по умолчанию"
             if self.config.device_index is not None:
                 input_kwargs["device"] = self.config.device_index
-                logger.info(f"Hotword: использует микрофон с индексом {self.config.device_index}")
+                try:
+                    device_info = sd.query_devices(self.config.device_index)
+                    device_name = device_info['name']
+                    logger.info(f"Hotword: использует микрофон [{self.config.device_index}] {device_name}")
+                except Exception as e:
+                    logger.warning(f"Не удалось получить имя устройства {self.config.device_index}: {e}")
+                    device_name = f"устройство {self.config.device_index}"
+                    logger.info(f"Hotword: использует микрофон [{self.config.device_index}]")
+            else:
+                try:
+                    default_input = sd.default.device[0]
+                    if default_input is not None:
+                        device_info = sd.query_devices(default_input)
+                        device_name = device_info['name']
+                        logger.info(f"Hotword: использует микрофон по умолчанию [{default_input}] {device_name}")
+                except Exception:
+                    logger.info("Hotword: использует микрофон по умолчанию")
             
             with sd.InputStream(**input_kwargs) as stream:
-                logger.info("Микрофон открыт, ожидание ключевого слова «Ким»...")
+                logger.info(f"Микрофон открыт ({device_name}), ожидание ключевого слова «Ким»...")
                 logger.info("Начинаю обработку аудиопотока...")
 
                 chunk_count = 0
@@ -206,14 +228,55 @@ class KimHotwordListener:
                         try:
                             data, overflowed = stream.read(self.config.chunk_size)
                             if overflowed:
-                                logger.warning("Переполнение буфера аудио!")
+                                self._overflow_count += 1
+                                logger.warning(
+                                    f"Переполнение буфера аудио! (всего: {self._overflow_count}) "
+                                    f"Устройство: {device_name}"
+                                )
+                                
+                                # Выводим совет через TTS при первом и каждом 10-м переполнении
+                                if self._overflow_count == 1 or self._overflow_count % 10 == 0:
+                                    advice = (
+                                        "Обнаружено переполнение буфера аудио. "
+                                        "Попробуйте закрыть другие программы, использующие микрофон, "
+                                        "или снизить нагрузку на систему. "
+                                        "Также проверьте настройки микрофона в Windows."
+                                    )
+                                    logger.warning(f"Совет пользователю: {advice}")
+                                    if self.error_tts_callback:
+                                        try:
+                                            self.error_tts_callback(advice)
+                                        except Exception as tts_error:
+                                            logger.error(f"Ошибка при выводе совета через TTS: {tts_error}")
                         except Exception as e:
                             error_code = getattr(e, 'errno', None)
                             error_msg = str(e)
                             
                             # Ошибка 247 - проблема с буферизацией/таймаутом
                             if error_code == 247 or '247' in error_msg:
-                                logger.debug(f"Ошибка 247 при чтении аудио (буферизация), повторная попытка...")
+                                self._error_247_count += 1
+                                logger.warning(
+                                    f"Ошибка 247 при чтении аудио (буферизация) "
+                                    f"(всего: {self._error_247_count}), устройство: {device_name}, "
+                                    f"повторная попытка..."
+                                )
+                                
+                                # Выводим совет через TTS при первом и каждом 10-м случае
+                                if self._error_247_count == 1 or self._error_247_count % 10 == 0:
+                                    advice = (
+                                        "Обнаружена проблема с буферизацией аудио. "
+                                        "Попробуйте закрыть другие программы, использующие микрофон, "
+                                        "или перезапустить ассистент. "
+                                        "Также проверьте настройки микрофона в Windows. "
+                                        "Запустите диагностику: python scripts/diagnose_microphone.py"
+                                    )
+                                    logger.warning(f"Совет пользователю: {advice}")
+                                    if self.error_tts_callback:
+                                        try:
+                                            self.error_tts_callback(advice)
+                                        except Exception as tts_error:
+                                            logger.error(f"Ошибка при выводе совета через TTS: {tts_error}")
+                                
                                 import time
                                 time.sleep(0.01)  # Небольшая задержка для стабилизации буфера
                                 try:

@@ -40,6 +40,35 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления в Telegram: {e}")
 
+    async def send_message_to_user(self, user_id: int, text: str) -> None:
+        """
+        Отправляет сообщение конкретному пользователю по его user_id.
+
+        Args:
+            user_id: ID пользователя Telegram
+            text: Текст сообщения
+        """
+        await self.send_text(user_id, text)
+
+    async def send_text(self, chat_id: int, text: str) -> None:
+        """
+        Отправляет текстовое сообщение в указанный чат.
+
+        Args:
+            chat_id: ID чата/пользователя Telegram
+            text: Текст сообщения
+        """
+        if not self.bot:
+            logger.error("Bot не инициализирован")
+            return
+
+        try:
+            await self.bot.send_message(chat_id=chat_id, text=text)
+            logger.info(f"Voice → Telegram: сообщение отправлено в chat_id={chat_id}, text='{text[:50]}...'")
+        except Exception as e:
+            logger.error(f"Voice → Telegram: ошибка отправки сообщения в chat_id={chat_id}: {e}")
+            raise
+
     async def close(self) -> None:
         """Закрывает сессию бота."""
         if self.bot:

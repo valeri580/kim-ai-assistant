@@ -1,25 +1,29 @@
 """Обработчики команд и сообщений Telegram-бота."""
 
+import asyncio
 from typing import Optional
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from kim_core.config.settings import AppConfig
 from kim_core.llm import BudgetExceededError, LLMError, LLMRouter
 from kim_core.logging import logger
 from kim_core.prompts import get_system_prompt
 from kim_telegram.storage.memory import InMemoryDialogStore
+from kim_telegram.utils.llm_wrapper import wrap_llm_call
 
 router = Router()
 
 # Глобальные зависимости (устанавливаются при инициализации бота)
 _dialog_store: Optional[InMemoryDialogStore] = None
 _llm_router: Optional[LLMRouter] = None
+_config: Optional[AppConfig] = None
 
 
 def init_dependencies(
-    dialog_store: InMemoryDialogStore, llm_router: LLMRouter
+    dialog_store: InMemoryDialogStore, llm_router: LLMRouter, config: AppConfig
 ) -> None:
     """
     Инициализирует зависимости для обработчиков.
@@ -27,10 +31,12 @@ def init_dependencies(
     Args:
         dialog_store: Хранилище контекста диалогов
         llm_router: Маршрутизатор LLM
+        config: Конфигурация приложения
     """
-    global _dialog_store, _llm_router
+    global _dialog_store, _llm_router, _config
     _dialog_store = dialog_store
     _llm_router = llm_router
+    _config = config
     logger.info("Зависимости для обработчиков инициализированы")
 
 
@@ -58,6 +64,20 @@ async def cmd_help(message: Message) -> None:
         "_Начать разговор заново, забыв предыдущую историю_\n\n"
         "*/myid* - Показать ваш Chat ID\n"
         "_Используется для настройки уведомлений диагностики_\n\n"
+        "📅 *Напоминания (Stage 2):*\n"
+        "*/remind* - Создать напоминание\n"
+        "_Формат: /remind YYYY-MM-DD HH:MM Текст [минут_до]_\n\n"
+        "*/reminders* - Показать список напоминаний\n"
+        "_Показывает все ваши запланированные напоминания_\n\n"
+        "*/remind_delete <id>* - Удалить напоминание\n"
+        "_Удаляет напоминание по его ID_\n\n"
+        "🌐 *Веб-поиск (Stage 2):*\n"
+        "*/web <запрос>* - Поиск в интернете\n"
+        "_Находит информацию в интернете по запросу_\n\n"
+        "📄 *Работа с файлами (Stage 2):*\n"
+        "*/file_summary <путь>* - Резюме файла\n"
+        "_Читает файл и делает краткое резюме через LLM_\n"
+        "_Поддерживаются: txt, md, pdf, docx_\n\n"
         "💬 *Обычные сообщения* - Задать вопрос Ким\n"
         "_Просто отправьте текст, и Ким ответит, учитывая контекст всего разговора_\n\n"
         "💡 *Совет:* Используйте в запросе фразы типа \"режим качества\" или \"реши это GPT-5\", "
@@ -121,8 +141,10 @@ async def handle_message(message: Message) -> None:
         await message.answer("Пожалуйста, отправьте текстовое сообщение.")
         return
 
-    # Показываем статус "печатает..."
-    await message.bot.send_chat_action(message.chat.id, "typing")
+    if _config is None:
+        logger.error("Конфигурация не инициализирована")
+        await message.answer("Ошибка инициализации. Попробуйте позже.")
+        return
 
     try:
         # Добавляем сообщение пользователя в историю
@@ -134,8 +156,12 @@ async def handle_message(message: Message) -> None:
 
         logger.debug(f"Отправка запроса в LLM для пользователя {user_id}, сообщений: {len(messages)}")
 
-        # Получаем ответ от LLM
-        response = await _llm_router.run(messages)
+        # Получаем ответ от LLM с таймаутом через обёртку
+        response = await wrap_llm_call(
+            message,
+            _llm_router.run(messages),
+            timeout_seconds=_config.llm_timeout_seconds,
+        )
 
         logger.info(f"Получен ответ от LLM для пользователя {user_id}, длина: {len(response)}")
 
@@ -151,15 +177,13 @@ async def handle_message(message: Message) -> None:
             "Ким исчерпал дневной лимит запросов, попробуйте завтра."
         )
 
-    except LLMError as e:
-        logger.error(f"Ошибка LLM для пользователя {user_id}: {e}")
-        await message.answer(
-            "Ким сейчас не может ответить из-за ошибки, попробуйте позже."
-        )
+    except (LLMError, TimeoutError, asyncio.TimeoutError):
+        # TimeoutError и LLMError уже обработаны в wrap_llm_call
+        # Сообщение пользователю уже отправлено, просто логируем для отладки
+        pass
 
-    except Exception as e:
-        logger.exception(f"Неожиданная ошибка для пользователя {user_id}: {e}")
-        await message.answer(
-            "Ким сейчас не может ответить из-за ошибки, попробуйте позже."
-        )
+    except Exception:
+        # Все остальные исключения уже обработаны в wrap_llm_call
+        # Сообщение пользователю уже отправлено, просто логируем для отладки
+        pass
 
